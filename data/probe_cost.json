@@ -1,0 +1,88 @@
+{
+  "what": "The same inference loop, five times, under four different probe configurations plus none. Every number below was printed by the workload's own harness at the end of its run -- steady-state mean per image and images per second -- so they are the numbers a person actually reads.",
+  "machine": {
+    "gpu": "NVIDIA GeForce RTX 5060 Ti, 8151 MiB, compute capability 12.0",
+    "driver": "595.97",
+    "cpu": "Intel Core Ultra 7 265K, 20 logical cores",
+    "ram_gb": 31.4,
+    "torch": "2.11.0+cu128",
+    "note": "One machine. Nothing here is a claim about hardware -- every finding is about what an instrument's output does and does not entitle you to say, and that survives the machine changing."
+  },
+  "workload": {
+    "model": "Depth-Anything-V2, encoder vits, input 518",
+    "repo_commit": "a561b84",
+    "kind": "inference, serial, 1 dataloader worker",
+    "kernel_launches_per_image": 420,
+    "note": "420 is the count Nsight Compute reported while sweeping one forward pass with no name filter."
+  },
+  "baseline_id": "none",
+  "runs": [
+    {
+      "id": "none",
+      "probe": null,
+      "filter": null,
+      "replay_passes": 0,
+      "launches_profiled": 0,
+      "images_counted": 1013,
+      "images_in_steady_window": 760,
+      "mean_ms_per_image": 83.41,
+      "images_per_second": 11.988,
+      "collected_anything": null,
+      "note": "No profiler attached. 760 images in the steady-state window -- by a wide margin the only cell here with a usable sample size, and the reason it is the baseline."
+    },
+    {
+      "id": "ncu_filter_magma",
+      "probe": "nsight-compute",
+      "filter": "magma_sgemmEx_kernel",
+      "replay_passes": 21,
+      "launches_profiled": 8,
+      "images_counted": 8,
+      "images_in_steady_window": 6,
+      "mean_ms_per_image": 81.48,
+      "images_per_second": 12.272,
+      "collected_anything": true,
+      "note": "Profiled 8 launches out of roughly 420 per image, 21 replay passes each -- and came out 2.3% FASTER than unprofiled. Six images cannot resolve 2.3%, so the honest reading is 'within noise of no probe at all', not 'the probe made it faster'."
+    },
+    {
+      "id": "ncu_filter_cutlass_short_name",
+      "probe": "nsight-compute",
+      "filter": "cutlass_80_simt_sgemm",
+      "replay_passes": 21,
+      "launches_profiled": 0,
+      "images_counted": 8,
+      "images_in_steady_window": 6,
+      "mean_ms_per_image": 83.49,
+      "images_per_second": 11.977,
+      "collected_anything": false,
+      "stderr_line": "==WARNING== No kernels were profiled.",
+      "report_written": true,
+      "note": "The name filter matched nothing -- the kernel's real name is the fully mangled `void cutlass::Kernel2<...>(T1::Params)`. The run still printed a steady-state mean, still printed a throughput, and still wrote a report file. Its number lands 0.1% from the unprofiled baseline and BETWEEN the two runs that did collect data. Nothing the run printed distinguishes it from a successful one except the single stderr line above."
+    },
+    {
+      "id": "ncu_filter_cutlass_full_name",
+      "probe": "nsight-compute",
+      "filter": "void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_nn_align1>(T1::Params)",
+      "replay_passes": 21,
+      "launches_profiled": 8,
+      "images_counted": 8,
+      "images_in_steady_window": 6,
+      "mean_ms_per_image": 84.15,
+      "images_per_second": 11.883,
+      "collected_anything": true,
+      "note": "The retry with the fully qualified name. 0.9% slower than unprofiled -- again inside the noise of a six-image window."
+    },
+    {
+      "id": "ncu_no_filter",
+      "probe": "nsight-compute",
+      "filter": null,
+      "replay_passes": 9,
+      "launches_profiled": 420,
+      "images_counted": 4,
+      "images_in_steady_window": 3,
+      "mean_ms_per_image": 14968.54,
+      "images_per_second": 0.067,
+      "collected_anything": true,
+      "note": "Every kernel, 9 replay passes each for the basic metric set. Fewer passes per launch than the filtered runs above and 179 times slower than no probe, because the cost is set by how many launches are replayed, not by how heavy the metric set is."
+    }
+  ]
+}

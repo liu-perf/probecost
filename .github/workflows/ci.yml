@@ -1,0 +1,208 @@
+name: ci
+
+# CPU only. No GPU, no CUDA, no Nsight, no network. Everything below is
+# arithmetic over the JSON in data/ -- which is the whole split: producing
+# those measurements needed a GPU and two profilers, and re-checking what was
+# concluded from them must need neither.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: pytest -q
+      - run: python -m compileall -q probecost
+
+      # The device, on the two things it exists to forbid.
+      - name: an unbounded cross-instrument comparison still raises
+        run: |
+          python - <<'PY'
+          from probecost.instrument import EXHAUSTIVE, PREFIX, InstrumentError, assert_comparable
+          from probecost.model import Measurement
+          def m(label, inst, rule, collected=True):
+              return Measurement(label=label, value=1.0, unit="ns", instrument=inst,
+                                 sampling_rule=rule, collected=collected)
+          # different instruments, no bound -> refused
+          try:
+              assert_comparable(m("a", "ncu", PREFIX), m("b", None, PREFIX))
+          except InstrumentError:
+              pass
+          else:
+              raise SystemExit("compared two instruments with no bound")
+          # different sampling rules -> refused even WITH a bound
+          try:
+              assert_comparable(m("a", "ncu", PREFIX), m("b", "nsys", EXHAUSTIVE),
+                                probe_effect_bound=0.01)
+          except InstrumentError:
+              pass
+          else:
+              raise SystemExit("a bound was allowed to repair a population mismatch")
+          assert_comparable(m("a", "ncu", PREFIX), m("b", None, PREFIX),
+                            probe_effect_bound=0.05)
+          print("both refusals hold; a bounded comparison is allowed")
+          PY
+
+      - name: "collected: unrecorded still raises"
+        run: |
+          python - <<'PY'
+          from probecost.instrument import NotCollectedError, assert_collected
+          for value in (None, False):
+              try:
+                  assert_collected("x", value)
+              except NotCollectedError:
+                  continue
+              raise SystemExit(f"collected={value!r} was allowed")
+          assert_collected("x", True)
+          print("None is not True, and False is not True")
+          PY
+
+      # The conclusions, as build gates. Re-run the profiling on another
+      # machine and leave the prose alone, and these fail -- which is the intent.
+      - name: the same probe still spans two orders of magnitude
+        run: |
+          probecost claims | tee /tmp/c.txt
+          grep -q "same probe, 184x spread" /tmp/c.txt
+          grep -q "179.457x" /tmp/c.txt
+          python - <<'PY'
+          from probecost import analysis
+          p = analysis.probe_cost()
+          d = p["passes_do_not_explain_it"]
+          # the expensive run must keep using FEWER passes than the cheap ones,
+          # or "the metric set was heavier" becomes available as an explanation
+          assert d["unfiltered_passes"] < d["filtered_passes"], d
+          assert p["cost_spread"] > 150, p["cost_spread"]
+          print("cost spread %.0fx on %d vs %d passes"
+                % (p["cost_spread"], d["unfiltered_passes"], d["filtered_passes"]))
+          PY
+
+      - name: the run that collected nothing is still undetectable from the timings
+        run: |
+          probecost empty | tee /tmp/e.txt
+          grep -q "No kernels were profiled" /tmp/e.txt
+          grep -q "no threshold on wall-clock cost" /tmp/e.txt
+          # and it must stay undetectable at every plausible tolerance, not just one
+          python - <<'PY'
+          from probecost import cost
+          for tol in (1.0, 2.0, 5.0, 10.0):
+              r = cost.indistinguishable_from_baseline(tolerance_pct=tol)
+              assert r["both_outcomes_inside"], (tol, r["inside"])
+          print("undetectable at 1, 2, 5 and 10 percent")
+          PY
+
+      # The control. Without it every finding here reads as "the profiler is
+      # broken", which this data contradicts.
+      - name: the instrument is still precise within a launch shape
+        run: |
+          python - <<'PY'
+          from probecost import analysis
+          r = analysis.instrument_is_repeatable()
+          assert r["median_cv_pct"] < 1.0, r
+          assert r["groups_under_1pct_cv"] >= 7, r
+          print("median CV %.3f%% across %d repeated shapes"
+                % (r["median_cv_pct"], r["groups_with_repeats"]))
+          PY
+
+      - name: the kernel name is still the wrong key
+        run: |
+          python - <<'PY'
+          from probecost import analysis
+          k = analysis.the_name_is_the_wrong_key()
+          assert k["worst"]["spread"] > 5.0, k["worst"]
+          # and holding the launch geometry fixed must still not be enough
+          same = k["same_geometry_still_varies"]
+          assert same and same[0]["spread"] > 3.0, same
+          print("by name %.2fx over %d launches; same geometry still %.2fx"
+                % (k["worst"]["spread"], k["worst"]["n"], same[0]["spread"]))
+          PY
+
+      - name: the short name still fails in both directions
+        run: |
+          probecost names | tee /tmp/n.txt
+          grep -q "17 different kernels share this short name" /tmp/n.txt
+          python - <<'PY'
+          from probecost import analysis
+          n = analysis.the_name_matches_two_things()
+          assert n["worst_collision"]["short_name"] == "Kernel2", n["worst_collision"]
+          assert n["and_the_other_direction"]["matched"] == 0, n
+          assert "matches 2 rows" in n["lookup_refusal"], n["lookup_refusal"]
+          print("over-matched 17, under-matched 0")
+          PY
+
+      # A false finding this tool produced about itself. The guard is by name.
+      - name: no collision key is a namespace token
+        run: |
+          python - <<'PY'
+          from probecost import population
+          banned = {"native", "at", "detail", "cuda", "unnamed", "cudnn", "cutlass"}
+          for wl, v in population.ambiguous_short_names().items():
+              keys = {c["short_name"] for c in v["collisions"]}
+              bad = keys & banned
+              if bad:
+                  raise SystemExit(f"{wl}: parser collapsed onto namespace {bad}")
+          print("no namespace tokens among the collision keys")
+          PY
+
+      - name: the spread still replicates on the second workload
+        run: |
+          probecost spread | tee /tmp/s.txt
+          grep -q "29 of 41" /tmp/s.txt
+          grep -q "54 of 94" /tmp/s.txt
+          python - <<'PY'
+          from probecost import analysis
+          w = analysis.whole_run_spread()
+          da, of = w["depth_anything_v2"], w["flownet2"]
+          for v in (da, of):
+              assert v["names_spanning_factor"] / v["names_considered"] > 0.5, v
+          # the two workloads share a node and a harness and nothing else
+          assert abs(da["median_cv_pct"] - of["median_cv_pct"]) < 3.0, (da, of)
+          print("median CV %.1f%% and %.1f%%" % (da["median_cv_pct"], of["median_cv_pct"]))
+          PY
+
+      - name: the cross-instrument comparison is still refused, with the numbers attached
+        run: |
+          if probecost --fail-on error compare magma_sgemmEx_kernel; then
+            echo "the comparison was not refused" >&2
+            exit 1
+          fi
+          probecost compare magma_sgemmEx_kernel | grep -q "different sets of launches"
+          probecost compare magma_sgemmEx_kernel | grep -q "ratio if you did it anyway"
+
+      # The apparent disagreement must stay labelled as not-a-calibration-error.
+      - name: the repository still declines to call it a calibration error
+        run: |
+          python - <<'PY'
+          from probecost import analysis
+          c = analysis.the_comparison_that_gets_refused()
+          assert c["all_refused"], c
+          assert c["changes_sign"], c
+          assert "is not one" in c["reading"], c["reading"]
+          print("apparent disagreement %.3f-%.3f, sign changes, and not claimed"
+                % tuple(c["ratio_range_if_you_ignored_the_refusal"]))
+          PY
+
+      - name: every probed cell still declares its sample size
+        run: |
+          probecost cost | tee /tmp/w.txt
+          test "$(grep -c 'images in the steady window' /tmp/w.txt)" -eq 4
+          # and the note must not call a 179x effect noise
+          if grep -q '17845.*is not a difference' /tmp/w.txt; then
+            echo "the sample-size note called a 179x effect noise" >&2
+            exit 1
+          fi
+          grep -q "far outside anything" /tmp/w.txt
+
+      - name: the report is still loud
+        run: |
+          test "$(probecost check | grep -c '\[error\]')" -ge 10

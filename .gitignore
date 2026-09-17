@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Profiler output. A .ncu-rep is tens to hundreds of megabytes and carries the
+# process id, the user's paths and the host it ran on. What belongs in this
+# repository is the de-identified export in data/, not the report it came from.
+*.ncu-rep
+*.nsys-rep
+*.sqlite
